@@ -1,6 +1,7 @@
 package me.lorenzo.presence.vault.impl;
 
 import com.mongodb.client.*;
+import com.mongodb.client.model.ReplaceOptions;
 import me.lorenzo.presence.entity.EntityBuilderInstructions;
 import me.lorenzo.presence.entity.service.EBIService;
 import me.lorenzo.presence.vault.DataVault;
@@ -11,7 +12,6 @@ import me.lorenzo.services.service.holder.Services;
 import org.bson.Document;
 
 import java.util.*;
-import java.util.stream.Collectors;
 
 public class MongoDataVault implements DataVault {
 
@@ -28,17 +28,18 @@ public class MongoDataVault implements DataVault {
     @Override
     public Optional<DataRecord> findOne(String collection, Query query) {
         MongoCollection<Document> coll = database.getCollection(collection);
-        Document filter = queryToDocument(query);
-        Document doc = coll.find(filter).first();
+        Document doc = coll.find(queryToDocument(query)).first();
         return doc == null ? Optional.empty() : Optional.of(new SimpleDataRecord(doc));
     }
 
     @Override
     public List<DataRecord> find(String collection, Query query) {
         MongoCollection<Document> coll = database.getCollection(collection);
-        Document filter = queryToDocument(query);
+        FindIterable<Document> iterable = coll.find(queryToDocument(query));
+        if (query.getLimit() > 0) iterable = iterable.limit(query.getLimit());
+        if (query.getOffset() > 0) iterable = iterable.skip(query.getOffset());
         List<DataRecord> results = new ArrayList<>();
-        coll.find(filter).forEach(doc -> results.add(new SimpleDataRecord(doc)));
+        iterable.forEach(doc -> results.add(new SimpleDataRecord(doc)));
         return results;
     }
 
@@ -55,25 +56,42 @@ public class MongoDataVault implements DataVault {
     }
 
     @Override
+    public long count(String collection, Query query) {
+        return database.getCollection(collection).countDocuments(queryToDocument(query));
+    }
+
+    @Override
     public void insert(String collection, DataRecord record) {
-        MongoCollection<Document> coll = database.getCollection(collection);
-        coll.insertOne(new Document(record.asMap()));
+        database.getCollection(collection).insertOne(new Document(record.asMap()));
+    }
+
+    @Override
+    public void insertMany(String collection, List<DataRecord> records) {
+        if (records.isEmpty()) return;
+        List<Document> docs = records.stream().map(r -> new Document(r.asMap())).toList();
+        database.getCollection(collection).insertMany(docs);
     }
 
     @Override
     public void update(String collection, Query query, DataRecord updates) {
-        MongoCollection<Document> coll = database.getCollection(collection);
-        Document filter = queryToDocument(query);
-        Document updateDoc = new Document();
-        updates.asMap().forEach(updateDoc::append);
-        coll.updateMany(filter, new Document("$set", updateDoc));
+        database.getCollection(collection).updateMany(
+                queryToDocument(query),
+                new Document("$set", new Document(updates.asMap()))
+        );
+    }
+
+    @Override
+    public void upsert(String collection, Query query, DataRecord record) {
+        database.getCollection(collection).replaceOne(
+                queryToDocument(query),
+                new Document(record.asMap()),
+                new ReplaceOptions().upsert(true)
+        );
     }
 
     @Override
     public void delete(String collection, Query query) {
-        MongoCollection<Document> coll = database.getCollection(collection);
-        Document filter = queryToDocument(query);
-        coll.deleteMany(filter);
+        database.getCollection(collection).deleteMany(queryToDocument(query));
     }
 
     private Document queryToDocument(Query query) {

@@ -33,13 +33,15 @@ public class MySQLDataVault implements DataVault {
 
     @Override
     public Optional<DataRecord> findOne(String collection, Query query) {
-        String sql = buildSelectQuery(collection, query, true);
+        List<String> filterKeys = new ArrayList<>(query.filters().keySet());
+        String sql = buildSelectQuery(collection, filterKeys, query, true);
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            setQueryParameters(ps, query);
-            ResultSet rs = ps.executeQuery();
-            if (rs.next()) return Optional.of(resultSetToRecord(rs));
-            return Optional.empty();
+            setParams(ps, filterKeys, query.filters(), 1);
+            try (ResultSet rs = ps.executeQuery()) {
+                if (rs.next()) return Optional.of(resultSetToRecord(rs));
+                return Optional.empty();
+            }
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
@@ -47,14 +49,16 @@ public class MySQLDataVault implements DataVault {
 
     @Override
     public List<DataRecord> find(String collection, Query query) {
-        String sql = buildSelectQuery(collection, query, false);
+        List<String> filterKeys = new ArrayList<>(query.filters().keySet());
+        String sql = buildSelectQuery(collection, filterKeys, query, false);
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            setQueryParameters(ps, query);
-            ResultSet rs = ps.executeQuery();
-            List<DataRecord> results = new ArrayList<>();
-            while (rs.next()) results.add(resultSetToRecord(rs));
-            return results;
+            setParams(ps, filterKeys, query.filters(), 1);
+            try (ResultSet rs = ps.executeQuery()) {
+                List<DataRecord> results = new ArrayList<>();
+                while (rs.next()) results.add(resultSetToRecord(rs));
+                return results;
+            }
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
@@ -63,8 +67,7 @@ public class MySQLDataVault implements DataVault {
     @Override
     public <T> Optional<T> findOne(String collection, Query query, Class<T> type) {
         EntityBuilderInstructions<T> builder = ebiService.getOrThrow(type);
-        Optional<DataRecord> record = findOne(collection, query);
-        return record.map(r -> builder.assemble(r.asMap()));
+        return findOne(collection, query).map(r -> builder.assemble(r.asMap()));
     }
 
     @Override
@@ -76,20 +79,75 @@ public class MySQLDataVault implements DataVault {
     }
 
     @Override
+    public long count(String collection, Query query) {
+        validateIdentifier(collection);
+        List<String> filterKeys = new ArrayList<>(query.filters().keySet());
+        filterKeys.forEach(this::validateIdentifier);
+        String sql = "SELECT COUNT(*) FROM `" + collection + "`";
+        if (!filterKeys.isEmpty()) {
+            String whereClause = filterKeys.stream()
+                    .map(k -> "`" + k + "` = ?")
+                    .collect(Collectors.joining(" AND "));
+            sql += " WHERE " + whereClause;
+        }
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            setParams(ps, filterKeys, query.filters(), 1);
+            try (ResultSet rs = ps.executeQuery()) {
+                rs.next();
+                return rs.getLong(1);
+            }
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
     public void insert(String collection, DataRecord record) {
         insertRow(collection, record.asMap());
     }
 
     @Override
-    public void update(String collection, Query query, DataRecord updates) {
-        String setClause = updates.asMap().keySet().stream().map(k -> k + " = ?").collect(Collectors.joining(", "));
-        String whereClause = query.filters().keySet().stream().map(k -> k + " = ?").collect(Collectors.joining(" AND "));
-        String sql = "UPDATE " + collection + " SET " + setClause + " WHERE " + whereClause;
+    public void insertMany(String collection, List<DataRecord> records) {
+        if (records.isEmpty()) return;
+        validateIdentifier(collection);
+        List<String> columns = new ArrayList<>(records.get(0).asMap().keySet());
+        columns.forEach(this::validateIdentifier);
+        String colClause = columns.stream().map(c -> "`" + c + "`").collect(Collectors.joining(", "));
+        String placeholders = columns.stream().map(c -> "?").collect(Collectors.joining(", "));
+        String sql = "INSERT INTO `" + collection + "` (" + colClause + ") VALUES (" + placeholders + ")";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            int index = 1;
-            for (String key : updates.asMap().keySet()) ps.setObject(index++, updates.asMap().get(key));
-            for (String key : query.filters().keySet()) ps.setObject(index++, query.filters().get(key));
+            for (DataRecord record : records) {
+                Map<String, Object> row = record.asMap();
+                int index = 1;
+                for (String col : columns) ps.setObject(index++, row.get(col));
+                ps.addBatch();
+            }
+            ps.executeBatch();
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    @Override
+    public void update(String collection, Query query, DataRecord updates) {
+        validateIdentifier(collection);
+        List<String> updateKeys = new ArrayList<>(updates.asMap().keySet());
+        List<String> filterKeys = new ArrayList<>(query.filters().keySet());
+        updateKeys.forEach(this::validateIdentifier);
+        filterKeys.forEach(this::validateIdentifier);
+        if (updateKeys.isEmpty()) return;
+        String setClause = updateKeys.stream().map(k -> "`" + k + "` = ?").collect(Collectors.joining(", "));
+        String sql = "UPDATE `" + collection + "` SET " + setClause;
+        if (!filterKeys.isEmpty()) {
+            String whereClause = filterKeys.stream().map(k -> "`" + k + "` = ?").collect(Collectors.joining(" AND "));
+            sql += " WHERE " + whereClause;
+        }
+        try (Connection conn = dataSource.getConnection();
+             PreparedStatement ps = conn.prepareStatement(sql)) {
+            int index = setParams(ps, updateKeys, updates.asMap(), 1);
+            setParams(ps, filterKeys, query.filters(), index);
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException(e);
@@ -97,12 +155,28 @@ public class MySQLDataVault implements DataVault {
     }
 
     @Override
+    public void upsert(String collection, Query query, DataRecord record) {
+        Optional<DataRecord> existing = findOne(collection, query);
+        if (existing.isPresent()) {
+            update(collection, query, record);
+        } else {
+            insert(collection, record);
+        }
+    }
+
+    @Override
     public void delete(String collection, Query query) {
-        String whereClause = query.filters().keySet().stream().map(k -> k + " = ?").collect(Collectors.joining(" AND "));
-        String sql = "DELETE FROM " + collection + " WHERE " + whereClause;
+        validateIdentifier(collection);
+        List<String> filterKeys = new ArrayList<>(query.filters().keySet());
+        filterKeys.forEach(this::validateIdentifier);
+        String sql = "DELETE FROM `" + collection + "`";
+        if (!filterKeys.isEmpty()) {
+            String whereClause = filterKeys.stream().map(k -> "`" + k + "` = ?").collect(Collectors.joining(" AND "));
+            sql += " WHERE " + whereClause;
+        }
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
-            setQueryParameters(ps, query);
+            setParams(ps, filterKeys, query.filters(), 1);
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException(e);
@@ -110,30 +184,45 @@ public class MySQLDataVault implements DataVault {
     }
 
     private void insertRow(String collection, Map<String, Object> row) {
-        String columns = String.join(", ", row.keySet());
-        String placeholders = row.keySet().stream().map(k -> "?").collect(Collectors.joining(", "));
-        String sql = "INSERT INTO " + collection + " (" + columns + ") VALUES (" + placeholders + ")";
+        validateIdentifier(collection);
+        List<String> columns = new ArrayList<>(row.keySet());
+        columns.forEach(this::validateIdentifier);
+        String colClause = columns.stream().map(c -> "`" + c + "`").collect(Collectors.joining(", "));
+        String placeholders = columns.stream().map(c -> "?").collect(Collectors.joining(", "));
+        String sql = "INSERT INTO `" + collection + "` (" + colClause + ") VALUES (" + placeholders + ")";
         try (Connection conn = dataSource.getConnection();
              PreparedStatement ps = conn.prepareStatement(sql)) {
             int index = 1;
-            for (String key : row.keySet()) ps.setObject(index++, row.get(key));
+            for (String col : columns) ps.setObject(index++, row.get(col));
             ps.executeUpdate();
         } catch (SQLException e) {
             throw new RuntimeException(e);
         }
     }
 
-    private String buildSelectQuery(String collection, Query query, boolean single) {
-        String whereClause = query.filters().keySet().stream().map(k -> k + " = ?").collect(Collectors.joining(" AND "));
-        String sql = "SELECT * FROM " + collection;
-        if (!query.filters().isEmpty()) sql += " WHERE " + whereClause;
-        if (single) sql += " LIMIT 1";
+    private String buildSelectQuery(String collection, List<String> filterKeys, Query query, boolean single) {
+        validateIdentifier(collection);
+        filterKeys.forEach(this::validateIdentifier);
+        String sql = "SELECT * FROM `" + collection + "`";
+        if (!filterKeys.isEmpty()) {
+            String whereClause = filterKeys.stream()
+                    .map(k -> "`" + k + "` = ?")
+                    .collect(Collectors.joining(" AND "));
+            sql += " WHERE " + whereClause;
+        }
+        if (single) {
+            sql += " LIMIT 1";
+        } else {
+            if (query.getLimit() > 0) sql += " LIMIT " + query.getLimit();
+            if (query.getOffset() > 0) sql += " OFFSET " + query.getOffset();
+        }
         return sql;
     }
 
-    private void setQueryParameters(PreparedStatement ps, Query query) throws SQLException {
-        int index = 1;
-        for (String key : query.filters().keySet()) ps.setObject(index++, query.filters().get(key));
+    private int setParams(PreparedStatement ps, List<String> keys, Map<String, Object> values, int startIndex) throws SQLException {
+        int index = startIndex;
+        for (String key : keys) ps.setObject(index++, values.get(key));
+        return index;
     }
 
     private DataRecord resultSetToRecord(ResultSet rs) throws SQLException {
@@ -143,6 +232,12 @@ public class MySQLDataVault implements DataVault {
             map.put(meta.getColumnName(i), rs.getObject(i));
         }
         return new SimpleDataRecord(map);
+    }
+
+    private void validateIdentifier(String identifier) {
+        if (!identifier.matches("[a-zA-Z_][a-zA-Z0-9_]*")) {
+            throw new IllegalArgumentException("Invalid SQL identifier: " + identifier);
+        }
     }
 
     public void close() {

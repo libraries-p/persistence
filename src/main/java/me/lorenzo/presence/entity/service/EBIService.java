@@ -16,7 +16,7 @@ public class EBIService implements Service<EBIService> {
         EntityBuilderInstructions<T> instructions = (EntityBuilderInstructions<T>) builderInstructions.get(clazz);
 
         if (instructions == null) {
-            throw new NullPointerException("No builder instructions registered for " + clazz);
+            throw new IllegalArgumentException("No builder instructions registered for " + clazz);
         }
 
         return instructions;
