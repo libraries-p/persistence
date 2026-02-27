@@ -1,1 +1,1 @@
-rootProject.name = "presence"
+rootProject.name = "persistence"
