@@ -24,6 +24,11 @@ dependencies {
     implementation("org.mongodb:mongodb-driver-sync")
 }
 
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
 tasks.test {
     useJUnitPlatform()
 }
