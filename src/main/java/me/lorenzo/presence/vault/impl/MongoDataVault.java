@@ -17,12 +17,10 @@ public class MongoDataVault implements DataVault {
 
     private final MongoClient mongoClient;
     private final MongoDatabase database;
-    private final EBIService ebiService;
 
     public MongoDataVault(String connectionString, String dbName) {
         this.mongoClient = MongoClients.create(connectionString);
         this.database = mongoClient.getDatabase(dbName);
-        this.ebiService = Services.getOrThrow(EBIService.class);
     }
 
     @Override
@@ -45,13 +43,13 @@ public class MongoDataVault implements DataVault {
 
     @Override
     public <T> Optional<T> findOne(String collection, Query query, Class<T> type) {
-        EntityBuilderInstructions<T> builder = ebiService.getOrThrow(type);
+        EntityBuilderInstructions<T> builder = Services.getOrThrow(EBIService.class).getOrThrow(type);
         return findOne(collection, query).map(r -> builder.assemble(r.asMap()));
     }
 
     @Override
     public <T> List<T> find(String collection, Query query, Class<T> type) {
-        EntityBuilderInstructions<T> builder = ebiService.getOrThrow(type);
+        EntityBuilderInstructions<T> builder = Services.getOrThrow(EBIService.class).getOrThrow(type);
         return find(collection, query).stream().map(r -> builder.assemble(r.asMap())).toList();
     }
 

@@ -17,7 +17,6 @@ import java.util.stream.Collectors;
 public class MySQLDataVault implements DataVault {
 
     private final HikariDataSource dataSource;
-    private final EBIService ebiService;
 
     public MySQLDataVault(String jdbcUrl, String username, String password) {
         HikariConfig config = new HikariConfig();
@@ -28,7 +27,6 @@ public class MySQLDataVault implements DataVault {
         config.setMinimumIdle(2);
         config.setPoolName("DataVaultPool");
         this.dataSource = new HikariDataSource(config);
-        this.ebiService = Services.getOrThrow(EBIService.class);
     }
 
     @Override
@@ -66,13 +64,13 @@ public class MySQLDataVault implements DataVault {
 
     @Override
     public <T> Optional<T> findOne(String collection, Query query, Class<T> type) {
-        EntityBuilderInstructions<T> builder = ebiService.getOrThrow(type);
+        EntityBuilderInstructions<T> builder = Services.getOrThrow(EBIService.class).getOrThrow(type);
         return findOne(collection, query).map(r -> builder.assemble(r.asMap()));
     }
 
     @Override
     public <T> List<T> find(String collection, Query query, Class<T> type) {
-        EntityBuilderInstructions<T> builder = ebiService.getOrThrow(type);
+        EntityBuilderInstructions<T> builder = Services.getOrThrow(EBIService.class).getOrThrow(type);
         return find(collection, query).stream()
                 .map(r -> builder.assemble(r.asMap()))
                 .toList();
