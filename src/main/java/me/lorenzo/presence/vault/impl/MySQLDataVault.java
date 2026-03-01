@@ -16,6 +16,9 @@ import java.util.stream.Collectors;
 
 public class MySQLDataVault implements DataVault {
 
+    // MySQL error code: Table 'x.y' doesn't exist
+    private static final int ER_NO_SUCH_TABLE = 1146;
+
     private final HikariDataSource dataSource;
 
     public MySQLDataVault(String jdbcUrl, String username, String password) {
@@ -41,6 +44,7 @@ public class MySQLDataVault implements DataVault {
                 return Optional.empty();
             }
         } catch (SQLException e) {
+            if (isTableNotFound(e)) return Optional.empty();
             throw new RuntimeException(e);
         }
     }
@@ -58,6 +62,7 @@ public class MySQLDataVault implements DataVault {
                 return results;
             }
         } catch (SQLException e) {
+            if (isTableNotFound(e)) return Collections.emptyList();
             throw new RuntimeException(e);
         }
     }
@@ -96,6 +101,7 @@ public class MySQLDataVault implements DataVault {
                 return rs.getLong(1);
             }
         } catch (SQLException e) {
+            if (isTableNotFound(e)) return 0L;
             throw new RuntimeException(e);
         }
     }
@@ -124,6 +130,11 @@ public class MySQLDataVault implements DataVault {
             }
             ps.executeBatch();
         } catch (SQLException e) {
+            if (isTableNotFound(e)) {
+                createTable(collection, records.get(0).asMap());
+                insertMany(collection, records);
+                return;
+            }
             throw new RuntimeException(e);
         }
     }
@@ -148,6 +159,7 @@ public class MySQLDataVault implements DataVault {
             setParams(ps, filterKeys, query.filters(), index);
             ps.executeUpdate();
         } catch (SQLException e) {
+            if (isTableNotFound(e)) return;
             throw new RuntimeException(e);
         }
     }
@@ -177,9 +189,14 @@ public class MySQLDataVault implements DataVault {
             setParams(ps, filterKeys, query.filters(), 1);
             ps.executeUpdate();
         } catch (SQLException e) {
+            if (isTableNotFound(e)) return;
             throw new RuntimeException(e);
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Internals
+    // -------------------------------------------------------------------------
 
     private void insertRow(String collection, Map<String, Object> row) {
         validateIdentifier(collection);
@@ -194,8 +211,42 @@ public class MySQLDataVault implements DataVault {
             for (String col : columns) ps.setObject(index++, row.get(col));
             ps.executeUpdate();
         } catch (SQLException e) {
+            if (isTableNotFound(e)) {
+                createTable(collection, row);
+                insertRow(collection, row);
+                return;
+            }
             throw new RuntimeException(e);
         }
+    }
+
+    /** Auto-creates the table based on the Java types of the first row's values. */
+    private void createTable(String collection, Map<String, Object> row) {
+        validateIdentifier(collection);
+        List<String> columns = new ArrayList<>(row.keySet());
+        columns.forEach(this::validateIdentifier);
+        String colDefs = columns.stream()
+                .map(c -> "`" + c + "` " + inferColumnType(row.get(c)))
+                .collect(Collectors.joining(", "));
+        String sql = "CREATE TABLE IF NOT EXISTS `" + collection + "` (" + colDefs + ")";
+        try (Connection conn = dataSource.getConnection();
+             Statement st = conn.createStatement()) {
+            st.executeUpdate(sql);
+        } catch (SQLException e) {
+            throw new RuntimeException(e);
+        }
+    }
+
+    private String inferColumnType(Object value) {
+        if (value instanceof Double || value instanceof Float) return "DOUBLE";
+        if (value instanceof Long) return "BIGINT";
+        if (value instanceof Integer) return "INT";
+        if (value instanceof Boolean) return "TINYINT(1)";
+        return "VARCHAR(255)";
+    }
+
+    private boolean isTableNotFound(SQLException e) {
+        return e.getErrorCode() == ER_NO_SUCH_TABLE;
     }
 
     private String buildSelectQuery(String collection, List<String> filterKeys, Query query, boolean single) {
